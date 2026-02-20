@@ -1,79 +1,164 @@
 import os
-from openai import OpenAI
-from dotenv import load_dotenv
-from typing import List, Dict
+import time
+from typing import Dict, List
 
-# 加载 .env 文件中的环境变量
+from dotenv import load_dotenv
+from openai import OpenAI
+
 load_dotenv()
 
-class HelloAgentsLLM:
-    """
-    为本书 "Hello Agents" 定制的LLM客户端。
-    它用于调用任何兼容OpenAI接口的服务，并默认使用流式响应。
-    """
-    def __init__(self, model: str = None, apiKey: str = None, baseUrl: str = None, timeout: int = None):
-        """
-        初始化客户端。优先使用传入参数，如果未提供，则从环境变量加载。
-        """
-        self.model = model or os.getenv("LLM_MODEL_ID")
-        apiKey = apiKey or os.getenv("LLM_API_KEY")
-        baseUrl = baseUrl or os.getenv("LLM_BASE_URL")
-        timeout = timeout or int(os.getenv("LLM_TIMEOUT", 60))
-        
-        if not all([self.model, apiKey, baseUrl]):
-            raise ValueError("模型ID、API密钥和服务地址必须被提供或在.env文件中定义。")
 
-        self.client = OpenAI(api_key=apiKey, base_url=baseUrl, timeout=timeout)
+class HelloAgentsLLM:
+    """Lightweight LLM client wrapper with retry and structured error result."""
+
+    def __init__(
+        self,
+        model: str = None,
+        apiKey: str = None,
+        baseUrl: str = None,
+        timeout: int = None,
+        verbose: bool = True,
+    ):
+        self.model = model or os.getenv("LLM_MODEL_ID")
+        api_key = apiKey or os.getenv("LLM_API_KEY")
+        base_url = baseUrl or os.getenv("LLM_BASE_URL")
+        timeout = timeout or int(os.getenv("LLM_TIMEOUT", 60))
+        self.verbose = verbose
+
+        if not all([self.model, api_key, base_url]):
+            raise ValueError(
+                "LLM_MODEL_ID, LLM_API_KEY, and LLM_BASE_URL must be provided via args or .env."
+            )
+
+        self.client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+
+    @staticmethod
+    def _classify_exception(exc: Exception) -> str:
+        name = exc.__class__.__name__
+        if name == "APITimeoutError":
+            return "timeout"
+        if name == "RateLimitError":
+            return "rate_limit"
+        if name == "APIConnectionError":
+            return "connection_error"
+        if name == "AuthenticationError":
+            return "auth_error"
+        if name == "BadRequestError":
+            return "bad_request"
+        if name == "PermissionDeniedError":
+            return "permission_denied"
+        if name == "NotFoundError":
+            return "not_found"
+        if name == "UnprocessableEntityError":
+            return "unprocessable_entity"
+        if name == "APIStatusError":
+            status_code = getattr(exc, "status_code", None)
+            if isinstance(status_code, int) and status_code >= 500:
+                return "server_error"
+            return "api_status_error"
+        return "unknown_error"
+
+    @staticmethod
+    def _is_retryable(error_type: str) -> bool:
+        return error_type in {
+            "timeout",
+            "rate_limit",
+            "connection_error",
+            "server_error",
+            "empty_response",
+            "unknown_error",
+        }
+
+    def think_result(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0,
+        max_retries: int = 2,
+        base_backoff_seconds: float = 0.5,
+        stream: bool = True,
+    ) -> Dict:
+        """Return a unified result payload for robust downstream handling."""
+        last_error = {
+            "ok": False,
+            "content": "",
+            "error_type": "unknown_error",
+            "error_message": "Unknown failure.",
+            "attempts": 0,
+        }
+
+        for attempt in range(1, max_retries + 2):
+            if self.verbose:
+                print(f"Calling model {self.model} (attempt {attempt}/{max_retries + 1})...")
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=temperature,
+                    stream=stream,
+                )
+
+                if stream:
+                    collected_content = []
+                    for chunk in response:
+                        content = chunk.choices[0].delta.content or ""
+                        if self.verbose:
+                            print(content, end="", flush=True)
+                        collected_content.append(content)
+                    if self.verbose:
+                        print()
+                    final_content = "".join(collected_content).strip()
+                else:
+                    final_content = (response.choices[0].message.content or "").strip()
+
+                if final_content:
+                    return {
+                        "ok": True,
+                        "content": final_content,
+                        "error_type": None,
+                        "error_message": "",
+                        "attempts": attempt,
+                    }
+
+                last_error = {
+                    "ok": False,
+                    "content": "",
+                    "error_type": "empty_response",
+                    "error_message": "LLM returned empty content.",
+                    "attempts": attempt,
+                }
+            except Exception as exc:  # pragma: no cover - depends on provider/runtime
+                error_type = self._classify_exception(exc)
+                last_error = {
+                    "ok": False,
+                    "content": "",
+                    "error_type": error_type,
+                    "error_message": str(exc),
+                    "attempts": attempt,
+                }
+
+            if attempt <= max_retries and self._is_retryable(last_error["error_type"]):
+                sleep_seconds = base_backoff_seconds * (2 ** (attempt - 1))
+                time.sleep(sleep_seconds)
+
+        return last_error
 
     def think(self, messages: List[Dict[str, str]], temperature: float = 0) -> str:
-        """
-        调用大语言模型进行思考，并返回其响应。
-        """
-        print(f"🧠 正在调用 {self.model} 模型...")
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                stream=True,
-            )
-            #Stream Response
-            #非流式：模型内部生成完整文本
-            #流式：每次生成一点，就立刻发送一小段（chunk）回来
-            
-            # 处理流式响应
-            print("✅ 大语言模型响应成功:")
-            collected_content = []
-            for chunk in response:
-                """
-                不是完整的message："choices": [...]
-                而是返回一个生成器对象：chunk.choices[0].delta.content
-                """
-                content = chunk.choices[0].delta.content or ""
-                print(content, end="", flush=True)
-                collected_content.append(content)
-            print()  # 在流式输出结束后换行
-            return "".join(collected_content)
+        """Backward-compatible interface: return text only."""
+        result = self.think_result(messages=messages, temperature=temperature)
+        return result["content"] if result["ok"] else ""
 
-        except Exception as e:
-            print(f"❌ 调用LLM API时发生错误: {e}")
-            return None
 
-# --- 客户端使用示例 ---
-if __name__ == '__main__':
+if __name__ == "__main__":
     try:
-        llmClient = HelloAgentsLLM()
-        
-        exampleMessages = [
+        llm_client = HelloAgentsLLM()
+        example_messages = [
             {"role": "system", "content": "You are a helpful assistant that writes Python code."},
-            {"role": "user", "content": "写一个快速排序算法"}
+            {"role": "user", "content": "Write a quicksort function in Python."},
         ]
-        
-        print("--- 调用LLM ---")
-        responseText = llmClient.think(exampleMessages)
-        if responseText:
-            print("\n\n--- 完整模型响应 ---")
-            print(responseText)
-
-    except ValueError as e:
-        print(e)
+        print("--- LLM Call ---")
+        response_text = llm_client.think(example_messages)
+        if response_text:
+            print("\n--- Full Response ---")
+            print(response_text)
+    except ValueError as exc:
+        print(exc)
