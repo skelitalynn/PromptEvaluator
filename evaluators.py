@@ -15,14 +15,17 @@ class PromptEvaluator:
         self.llm = llm
 
     def evaluate(self, prompt: str) -> str:
+        #将用户prompt填入评分模板
         prompt_text = EVALUATION_PROMPT_TEMPLATE.format(prompt=prompt)
         messages = [{"role": "user", "content": prompt_text}]
+        #调用think返回原始文本
         return self.llm.think(messages) or ""
 
     def evaluate_as_json(self, prompt: str) -> Dict:
         raw = self.evaluate(prompt)
         return self.parse_json(raw)
 
+    #容错解析
     @staticmethod
     def parse_json(text: str) -> Dict:
         if not text:

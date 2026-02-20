@@ -67,3 +67,11 @@ Then choose mode:
 - `1` Basic evaluator
 - `2` Plan-and-Solve evaluator
 - `3` Reflection agent
+
+## Test
+
+Run tests from project root:
+
+```bash
+pytest -q
+```

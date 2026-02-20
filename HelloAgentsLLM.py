@@ -37,11 +37,18 @@ class HelloAgentsLLM:
                 temperature=temperature,
                 stream=True,
             )
+            #Stream Response
+            #非流式：模型内部生成完整文本
+            #流式：每次生成一点，就立刻发送一小段（chunk）回来
             
             # 处理流式响应
             print("✅ 大语言模型响应成功:")
             collected_content = []
             for chunk in response:
+                """
+                不是完整的message："choices": [...]
+                而是返回一个生成器对象：chunk.choices[0].delta.content
+                """
                 content = chunk.choices[0].delta.content or ""
                 print(content, end="", flush=True)
                 collected_content.append(content)
